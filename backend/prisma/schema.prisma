@@ -1,0 +1,67 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id                  String               @id @default(cuid())
+  email               String               @unique
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  profiles            Profile[]
+  supportTransactions SupportTransaction[] @relation("SupporterTransactions")
+}
+
+model Profile {
+  id                  String               @id @default(cuid())
+  username            String               @unique
+  displayName         String
+  bio                 String
+  avatarUrl           String?
+  walletAddress       String
+  ownerId             String
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  owner               User                 @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  acceptedAssets      AcceptedAsset[]
+  supportTransactions SupportTransaction[]
+}
+
+model AcceptedAsset {
+  id        String   @id @default(cuid())
+  code      String
+  issuer    String?
+  profileId String
+  createdAt DateTime @default(now())
+  profile   Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+}
+
+model SupportTransaction {
+  id               String    @id @default(cuid())
+  txHash           String    @unique
+  amount           Decimal   @db.Decimal(18, 7)
+  assetCode        String
+  assetIssuer      String?
+  status           String
+  message          String?
+  stellarNetwork   String
+  supporterAddress String?
+  recipientAddress String
+  profileId        String
+  supporterId      String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  profile          Profile   @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  supporter        User?     @relation("SupporterTransactions", fields: [supporterId], references: [id], onDelete: SetNull)
+
+  @@index([profileId])
+  @@index([supporterId])
+}
+
