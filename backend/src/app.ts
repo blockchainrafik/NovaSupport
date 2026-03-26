@@ -142,9 +142,10 @@ export function createApp() {
         include: { acceptedAssets: true },
       });
       return res.status(201).json(profile);
-    } catch (e: unknown) {
+    } catch (e: any) {
       if (e && typeof e === "object" && "code" in e && e.code === "P2002") {
-        return sendError(res, 409, "Username already taken", "USERNAME_TAKEN");
+        const field = e.meta?.target?.includes("email") ? "Email" : "Username";
+        return sendError(res, 409, `${field} already taken`, `${field.toUpperCase()}_TAKEN`);
       }
       return sendError(res, 500, "Internal server error");
     }
