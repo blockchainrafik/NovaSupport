@@ -37,6 +37,30 @@ export function createApp() {
     res.json(profile);
   });
 
+  const updateProfileSchema = z.object({
+    displayName: z.string().min(1).max(64).optional(),
+    bio: z.string().max(280).optional(),
+    walletAddress: z.string().startsWith("G").length(56).optional(),
+    avatarUrl: z.string().url().optional(),
+  });
+
+  app.patch("/profiles/:username", async (req, res) => {
+    const result = updateProfileSchema.safeParse(req.body);
+    if (!result.success) return sendError(res, 400, "Invalid request body");
+
+    try {
+      const profile = await prisma.profile.update({
+        where: { username: req.params.username },
+        data: result.data,
+        include: { acceptedAssets: true },
+      });
+      res.json(profile);
+    } catch (e: any) {
+      if (e.code === "P2025") return sendError(res, 404, "Profile not found");
+      return sendError(res, 500, "Internal server error");
+    }
+  });
+
   const createProfileSchema = z.object({
     username: z.string().min(3).max(32).regex(/^[a-z0-9-]+$/),
     displayName: z.string().min(1).max(64),
