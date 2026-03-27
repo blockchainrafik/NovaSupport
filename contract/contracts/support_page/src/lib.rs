@@ -1,6 +1,13 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol};
+use soroban_sdk::{contract, contractimpl, contracterror, contracttype, symbol_short, Address, Env, String, Symbol};
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ContractError {
+    InvalidAmount = 1,
+}
 
 #[derive(Clone)]
 #[contracttype]
@@ -31,11 +38,11 @@ impl SupportPageContract {
         amount: i128,
         asset_code: String,
         message: String,
-    ) -> u32 {
+    ) -> Result<u32, ContractError> {
         supporter.require_auth();
 
         if amount <= 0 {
-            panic!("amount must be positive");
+            return Err(ContractError::InvalidAmount);
         }
 
         let count = env
@@ -61,7 +68,7 @@ impl SupportPageContract {
 
         env.events().publish((topic,), event);
 
-        count
+        Ok(count)
     }
 
     pub fn support_count(env: Env) -> u32 {
@@ -126,5 +133,47 @@ mod test {
         let (_, _, data) = events.get(0).unwrap();
         let event: SupportEvent = data.try_into_val(&env).expect("deserialize SupportEvent");
         assert_eq!(event.timestamp, 1_700_000_000);
+    }
+
+    #[test]
+    fn rejects_zero_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(SupportPageContract, ());
+        let client = SupportPageContractClient::new(&env, &contract_id);
+
+        let supporter = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let result = client.try_support(
+            &supporter,
+            &recipient,
+            &0_i128,
+            &String::from_str(&env, "XLM"),
+            &String::from_str(&env, "test"),
+        );
+
+        assert_eq!(result, Err(Ok(ContractError::InvalidAmount)));
+    }
+
+    #[test]
+    fn rejects_negative_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(SupportPageContract, ());
+        let client = SupportPageContractClient::new(&env, &contract_id);
+
+        let supporter = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let result = client.try_support(
+            &supporter,
+            &recipient,
+            &-1_i128,
+            &String::from_str(&env, "XLM"),
+            &String::from_str(&env, "test"),
+        );
+
+        assert_eq!(result, Err(Ok(ContractError::InvalidAmount)));
     }
 }
