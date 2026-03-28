@@ -82,6 +82,9 @@ export default function CreatePage() {
 
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [assets, setAssets] = useState<Array<{ code: string; issuer: string }>>([
+    { code: "XLM", issuer: "" },
+  ]);
 
   function set(field: keyof FormData) {
     return (
@@ -128,10 +131,16 @@ export default function CreatePage() {
 
     setLoading(true);
     try {
+      const acceptedAssets = assets
+        .filter((a) => a.code.trim() !== "")
+        .map((a) => ({ code: a.code.trim(), issuer: a.issuer.trim() || undefined }));
+
+      const payload = { ...form, acceptedAssets };
+
       const res = await fetch(`${API_BASE_URL}/profiles`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify(payload),
       });
 
       if (res.status === 409) setError("Username already taken.");
@@ -350,6 +359,61 @@ export default function CreatePage() {
               <p className="text-[10px] text-steel/50 pl-1">
                 56-character Stellar public key starting with G
               </p>
+            </div>
+
+            {/* Accepted assets */}
+            <div className="flex flex-col gap-2">
+              <label className="text-[10px] uppercase tracking-[0.25em] text-steel">
+                Accepted Assets <span className="text-steel/40">(XLM required)</span>
+              </label>
+              <div className="space-y-2">
+                {assets.map((asset, idx) => (
+                  <div key={idx} className="flex gap-2 items-center">
+                    <input
+                      type="text"
+                      placeholder="Code (e.g. XLM, USDC)"
+                      value={asset.code}
+                      onChange={(e) =>
+                        setAssets((prev) =>
+                          prev.map((p, i) => (i === idx ? { ...p, code: e.target.value } : p))
+                        )
+                      }
+                      className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-steel/40"
+                    />
+
+                    <input
+                      type="text"
+                      placeholder="Issuer (optional)"
+                      value={asset.issuer}
+                      onChange={(e) =>
+                        setAssets((prev) =>
+                          prev.map((p, i) => (i === idx ? { ...p, issuer: e.target.value } : p))
+                        )
+                      }
+                      className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-steel/40"
+                    />
+
+                    {idx !== 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setAssets((prev) => prev.filter((_, i) => i !== idx))}
+                        className="text-sm text-red-400 px-2 py-1"
+                      >
+                        Remove
+                      </button>
+                    ) : (
+                      <span className="text-xs text-steel/50 ml-2">Native</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => setAssets((prev) => [...prev, { code: "", issuer: "" }])}
+                className="mt-2 text-sm text-mint"
+              >
+                + Add asset
+              </button>
             </div>
 
             {/* Error banner */}
