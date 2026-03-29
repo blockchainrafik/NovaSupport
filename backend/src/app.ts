@@ -1,16 +1,67 @@
 import cors from "cors";
 import express, { Response } from "express";
-import morgan from "morgan";
+import { rateLimit } from "express-rate-limit";
+import { pinoHttp } from "pino-http";
+import type { Logger } from "pino";
 import { z } from "zod";
 import { StrKey } from "@stellar/stellar-sdk";
 import { prisma } from "./db.js";
+import { logger } from "./logger.js";
+import multer from "multer";
+import { createClient } from "@supabase/supabase-js";
+
+const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MAX_FILE_SIZE = 2_097_152;
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE },
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", file.fieldname));
+    }
+  },
+});
+
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseClient = supabaseUrl && supabaseKey
+  ? createClient(supabaseUrl, supabaseKey)
+  : null;
+
+if (!supabaseClient) {
+  logger.warn("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set — avatar upload endpoint will return 503");
+}
+
+function createRateLimiters() {
+  const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, please try again later." },
+  });
+
+  const writeLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, please try again later." },
+  });
+
+  return { globalLimiter, writeLimiter };
+}
 
 function sendError(res: Response, status: number, message: string, code?: string) {
   return res.status(status).json({ error: message, ...(code ? { code } : {}) });
 }
 
-export function createApp() {
+export function createApp(customLogger?: Logger) {
   const app = express();
+  const { globalLimiter, writeLimiter } = createRateLimiters();
 
   const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "http://localhost:3000")
     .split(",")
@@ -27,11 +78,12 @@ export function createApp() {
     },
   }));
   app.use(express.json());
-  app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+  app.use(pinoHttp({ logger: customLogger ?? logger }));
+  app.use(globalLimiter);
 
   // ── Health check with database connectivity ────────────────────────────
 
-  app.get("/health", async (_req, res) => {
+  app.get("/health", async (req, res) => {
     try {
       await prisma.$queryRaw`SELECT 1`;
       res.json({
@@ -40,7 +92,8 @@ export function createApp() {
         network: "Stellar Testnet",
         database: "connected",
       });
-    } catch {
+    } catch (e: unknown) {
+      req.log.error({ err: e }, "health check database error");
       res.status(503).json({
         ok: false,
         service: "NovaSupport backend",
@@ -67,7 +120,8 @@ export function createApp() {
       ]);
 
       res.json({ profiles, total, limit, offset });
-    } catch {
+    } catch (e: unknown) {
+      req.log.error({ err: e }, "database error listing profiles");
       return sendError(res, 500, "Internal server error");
     }
   });
@@ -88,7 +142,8 @@ export function createApp() {
       }
 
       res.json(profile);
-    } catch {
+    } catch (e: unknown) {
+      req.log.error({ err: e }, "database error fetching profile");
       return sendError(res, 500, "Internal server error");
     }
   });
@@ -114,10 +169,11 @@ export function createApp() {
     })).min(1),
   });
 
-  app.post("/profiles", async (req, res) => {
+  app.post("/profiles", writeLimiter, async (req, res) => {
     const parsed = createProfileSchema.safeParse(req.body);
 
     if (!parsed.success) {
+      req.log.warn({ issues: parsed.error.flatten() }, "validation failed");
       return sendError(res, 400, "Invalid request body");
     }
 
@@ -139,12 +195,15 @@ export function createApp() {
         },
         include: { acceptedAssets: true },
       });
+      req.log.info({ username: profile.username }, "profile created");
       return res.status(201).json(profile);
-    } catch (e: any) {
-      if (e && typeof e === "object" && "code" in e && e.code === "P2002") {
-        const field = e.meta?.target?.includes("email") ? "Email" : "Username";
+    } catch (e: unknown) {
+      if (e && typeof e === "object" && "code" in e && (e as { code: string }).code === "P2002") {
+        const meta = (e as { meta?: { target?: string[] } }).meta;
+        const field = meta?.target?.includes("email") ? "Email" : "Username";
         return sendError(res, 409, `${field} already taken`, `${field.toUpperCase()}_TAKEN`);
       }
+      req.log.error({ err: e }, "database error creating profile");
       return sendError(res, 500, "Internal server error");
     }
   });
@@ -161,15 +220,17 @@ export function createApp() {
     githubHandle: z.string().max(39).regex(/^[a-zA-Z0-9-]+$/).optional().nullable(),
   });
 
-  app.patch("/profiles/:username", async (req, res) => {
+  app.patch("/profiles/:username", writeLimiter, async (req, res) => {
     const parsed = updateProfileSchema.safeParse(req.body);
 
     if (!parsed.success) {
+      req.log.warn({ issues: parsed.error.flatten() }, "validation failed");
       return sendError(res, 400, "Invalid request body");
     }
 
+    const username = req.params.username as string;
     const profile = await prisma.profile.findUnique({
-      where: { username: req.params.username },
+      where: { username },
     });
 
     if (!profile) {
@@ -178,7 +239,7 @@ export function createApp() {
 
     try {
       const updated = await prisma.profile.update({
-        where: { username: req.params.username },
+        where: { username },
         data: parsed.data,
         include: { acceptedAssets: true },
       });
@@ -187,6 +248,7 @@ export function createApp() {
       if (e && typeof e === "object" && "code" in e && e.code === "P2002") {
         return sendError(res, 409, "Email already in use", "EMAIL_TAKEN");
       }
+      req.log.error({ err: e }, "database error updating profile");
       return sendError(res, 500, "Internal server error");
     }
   });
@@ -239,17 +301,20 @@ export function createApp() {
     res.json({ transactions, total, limit, offset });
   });
 
-  app.post("/support-transactions", async (req, res) => {
+  app.post("/support-transactions", writeLimiter, async (req, res) => {
     const parsed = supportPayloadSchema.safeParse(req.body);
 
     if (!parsed.success) {
-      return res.status(400).json({ error: parsed.error.flatten() });
+      const flat = parsed.error.flatten();
+      req.log.warn({ issues: flat }, "validation failed");
+      return res.status(400).json({ error: flat });
     }
 
     const supportRecord = await prisma.supportTransaction.create({
       data: parsed.data,
     });
 
+    req.log.info({ txHash: supportRecord.txHash }, "support transaction recorded");
     res.status(201).json(supportRecord);
   });
 
@@ -287,6 +352,70 @@ export function createApp() {
     }
 
     res.json(data);
+  });
+
+  // ── Avatar upload ──────────────────────────────────────────────────────
+
+  app.post(
+    "/profiles/:username/avatar",
+    writeLimiter,
+    upload.single("avatar"),
+    async (req, res) => {
+      if (!supabaseClient) {
+        return sendError(res, 503, "Avatar upload service unavailable");
+      }
+
+      const bucket = process.env.SUPABASE_AVATAR_BUCKET;
+      if (!bucket) {
+        return sendError(res, 503, "Avatar upload service unavailable");
+      }
+
+      const username = req.params.username as string;
+
+      const profile = await prisma.profile.findUnique({
+        where: { username },
+      });
+
+      if (!profile) {
+        return sendError(res, 404, "Profile not found");
+      }
+
+      const path = `avatars/${username}`;
+      const { error: uploadError } = await supabaseClient.storage
+        .from(bucket)
+        .upload(path, req.file!.buffer, { upsert: true });
+
+      if (uploadError) {
+        req.log.error({ err: uploadError }, "supabase storage upload failed");
+        return sendError(res, 502, "Avatar storage upload failed");
+      }
+
+      const { data: { publicUrl } } = supabaseClient.storage
+        .from(bucket)
+        .getPublicUrl(path);
+
+      try {
+        const updated = await prisma.profile.update({
+          where: { username },
+          data: { avatarUrl: publicUrl },
+          include: { acceptedAssets: true },
+        });
+        return res.json(updated);
+      } catch (e: unknown) {
+        req.log.error({ err: e }, "database error updating avatarUrl");
+        return sendError(res, 500, "Internal server error");
+      }
+    }
+  );
+
+  // ── Multer error handler ───────────────────────────────────────────────
+
+  app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") return sendError(res, 413, "File too large");
+      return sendError(res, 422, "Invalid file");
+    }
+    next(err);
   });
 
   return app;
